@@ -9,7 +9,13 @@ During the v0.x phase no compat promise is made between minor versions
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- The image-builder controller now bypasses its informer cache when reading a
+  referenced BuildKit Secret. Secret validation therefore uses the intended
+  namespace-scoped `get` permission instead of attempting a cluster-wide
+  Secret list/watch, which made the controller unready and stalled unrelated
+  builds as soon as a build declared `secrets:`.
 
 ## [0.3.0] - 2026-07-18
 
