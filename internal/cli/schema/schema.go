@@ -36,6 +36,10 @@ type File struct {
 	// Optional. Tunables for the in-cluster git-server (flywheel-system).
 	GitServer GitServer `json:"git_server,omitempty"`
 
+	// Optional. Tunables for the shared in-cluster git-auto-sync controller
+	// (flywheel-system).
+	GitAutoSync GitAutoSync `json:"git_auto_sync,omitempty"`
+
 	// Optional. Declares the sibling app repos this cluster's dev loop needs,
 	// one entry per worktree under paths.workspaces_root. The single source of
 	// truth for `up`-clone and the local-only guard (see the 2026-06-17
@@ -133,6 +137,32 @@ func (f *File) GitServerMemoryLimit() string {
 		return l
 	}
 	return DefaultGitServerMemoryLimit
+}
+
+// GitAutoSync holds tunables for the shared in-cluster git-auto-sync
+// controller that mirrors application worktrees into the local git-server.
+type GitAutoSync struct {
+	// MemoryLimit is the container memory limit. The default (128Mi) preserves
+	// existing behavior, but clients with many or large worktrees may need a
+	// higher limit because Git subprocesses and filesystem cache are charged to
+	// the controller's cgroup.
+	// Optional; defaults to DefaultGitAutoSyncMemoryLimit via
+	// File.GitAutoSyncMemoryLimit(). A Kubernetes memory quantity (128Mi, 1Gi…).
+	MemoryLimit string `json:"memory_limit,omitempty"`
+}
+
+// DefaultGitAutoSyncMemoryLimit is the git-auto-sync container memory limit
+// when git_auto_sync.memory_limit is unset. Keep the historical baked-in value
+// so existing clients behave identically until they opt into a higher limit.
+const DefaultGitAutoSyncMemoryLimit = "128Mi"
+
+// GitAutoSyncMemoryLimit returns the configured git-auto-sync memory limit, or
+// the default ("128Mi") when unset.
+func (f *File) GitAutoSyncMemoryLimit() string {
+	if l := strings.TrimSpace(f.GitAutoSync.MemoryLimit); l != "" {
+		return l
+	}
+	return DefaultGitAutoSyncMemoryLimit
 }
 
 // Workspace declares the sibling app repos this cluster depends on, keyed by
@@ -362,6 +392,11 @@ func Validate(f *File) error {
 	// Kubernetes memory quantity (a typo would fail the Deployment apply later).
 	if l := strings.TrimSpace(f.GitServer.MemoryLimit); l != "" && !memoryQuantityRe.MatchString(l) {
 		es = append(es, ValidateError{"git_server.memory_limit", fmt.Sprintf("%q is not a valid memory quantity (e.g. 128Mi, 512Mi, 1Gi)", l)})
+	}
+	// git_auto_sync.memory_limit follows the same quantity contract as the
+	// git-server limit; reject typos before rendering a Deployment patch.
+	if l := strings.TrimSpace(f.GitAutoSync.MemoryLimit); l != "" && !memoryQuantityRe.MatchString(l) {
+		es = append(es, ValidateError{"git_auto_sync.memory_limit", fmt.Sprintf("%q is not a valid memory quantity (e.g. 128Mi, 512Mi, 1Gi)", l)})
 	}
 
 	// workspace.repos: each entry needs a dir-safe name, exactly one of

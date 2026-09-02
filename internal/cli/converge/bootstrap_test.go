@@ -78,12 +78,12 @@ func TestRenderBootstrap_ResolvesImageRefs(t *testing.T) {
 	if regexp.MustCompile(`(?m)^\s*images:`).MatchString(cbk) {
 		t.Errorf("client-builders-kustomization.yaml renders a bare images: key (YAML null; Flux CRD rejects it):\n%s", cbk)
 	}
-	// The flywheel-dev-loop Kustomization patches git-server's memory limit so
-	// Flux's reconcile agrees with the step-11a direct apply. cfg leaves
-	// git_server.memory_limit unset here, so it must render the default.
-	for _, want := range []string{"patches:", "name: git-server", "memory: 128Mi"} {
+	// The flywheel-dev-loop Kustomization patches both dev-loop memory limits so
+	// Flux's reconcile agrees with the step-11a direct apply. cfg leaves both
+	// limits unset here, so each target must render with the shared 128Mi default.
+	for _, want := range []string{"patches:", "name: git-server", "name: git-auto-sync", "memory: 128Mi"} {
 		if !strings.Contains(bk, want) {
-			t.Errorf("builders-kustomization.yaml missing git-server memory patch %q:\n%s", want, bk)
+			t.Errorf("builders-kustomization.yaml missing dev-loop memory patch %q:\n%s", want, bk)
 		}
 	}
 	if strings.Contains(bk, "k3d-acme-local-registry") {
@@ -155,9 +155,9 @@ func TestRenderBootstrap_NoExplicitNulls(t *testing.T) {
 	lintNoExplicitNulls(t, dir)
 }
 
-// A configured git_server.memory_limit flows into the flywheel-dev-loop
-// Kustomization's patch, so Flux reconciles the cluster to the raised limit.
-func TestRenderBootstrap_GitServerMemoryLimit(t *testing.T) {
+// Configured dev-loop memory limits flow into the flywheel-dev-loop
+// Kustomization's patches, so Flux reconciles the cluster to the raised limits.
+func TestRenderBootstrap_DevLoopMemoryLimits(t *testing.T) {
 	cfg := &flywheelSchema.File{}
 	cfg.Client.Name = "acme"
 	cfg.Cluster.Name = "acme-local"
@@ -167,6 +167,7 @@ func TestRenderBootstrap_GitServerMemoryLimit(t *testing.T) {
 	cfg.Local.Domain = "localdev.me"
 	cfg.Namespaces.Apps = "apps" // loader-defaulted in production; set explicitly here
 	cfg.GitServer.MemoryLimit = "512Mi"
+	cfg.GitAutoSync.MemoryLimit = "384Mi"
 
 	refs := map[string]string{
 		"git-server":               "ghcr.io/cobr-io/git-server:v0.1.0",
@@ -182,7 +183,10 @@ func TestRenderBootstrap_GitServerMemoryLimit(t *testing.T) {
 
 	bk := mustRead(t, filepath.Join(dir, "builders-kustomization.yaml"))
 	if !strings.Contains(bk, "memory: 512Mi") {
-		t.Errorf("configured memory_limit not rendered into the dev-loop patch:\n%s", bk)
+		t.Errorf("configured git-server memory_limit not rendered into the dev-loop patch:\n%s", bk)
+	}
+	if !strings.Contains(bk, "memory: 384Mi") {
+		t.Errorf("configured git-auto-sync memory_limit not rendered into the dev-loop patch:\n%s", bk)
 	}
 }
 

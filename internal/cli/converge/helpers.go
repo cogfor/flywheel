@@ -22,11 +22,10 @@ import (
 // rewritten for THIS client using the resolved (override-aware) refs
 // from imagepin.Resolve. Each `ghcr.io/cobr-io/<name>` slot in the base
 // is rewritten to the resolved ref — same as what's already imported
-// into the cluster's containerd in up's mirror-images step. gitServerMemLimit patches the
-// git-server container memory limit (see § git-server OOM, issue #4); it
-// MUST match the limit the flywheel-dev-loop Flux Kustomization applies
-// (builders-kustomization.yaml.tmpl), or the two reconcile paths would
-// fight — both are rendered from the same cfg.GitServerMemoryLimit().
+// into the cluster's containerd in up's mirror-images step. The memory-limit
+// arguments patch the git-server and git-auto-sync containers; they MUST match
+// the limits the flywheel-dev-loop Flux Kustomization applies
+// (builders-kustomization.yaml.tmpl), or the two reconcile paths would fight.
 // It returns a ResourceRef for every object it applied, so `up` can fold the
 // dev-loop machinery into the keep set its orphan prune
 // (PruneOrphanedMachinery) scans against.
@@ -37,7 +36,7 @@ import (
 // (flywheel-dev-loop Kustomization, whose spec.path also points at
 // manifests/dev-loop/overlays/local). Applying `../base` alone would
 // silently skip anything the overlay adds on top of base.
-func ApplyDevLoop(ctx context.Context, a *applier.Applier, overlayDir string, refs map[string]string, gitServerMemLimit string, out io.Writer) ([]applier.ResourceRef, error) {
+func ApplyDevLoop(ctx context.Context, a *applier.Applier, overlayDir string, refs map[string]string, gitServerMemLimit, gitAutoSyncMemLimit string, out io.Writer) ([]applier.ResourceRef, error) {
 	// Create the transient overlay as a sibling of `base` and `overlays`
 	// inside the cache tree, so the resource reference is simply
 	// `../overlays/local` — no absolute paths (kustomize forbids them) and
@@ -50,7 +49,7 @@ func ApplyDevLoop(ctx context.Context, a *applier.Applier, overlayDir string, re
 	}
 	defer os.RemoveAll(tmp)
 
-	kustomization := renderDevLoopKustomization(refs, gitServerMemLimit)
+	kustomization := renderDevLoopKustomization(refs, gitServerMemLimit, gitAutoSyncMemLimit)
 	if err := os.WriteFile(filepath.Join(tmp, "kustomization.yaml"), []byte(kustomization), 0o644); err != nil {
 		return nil, err
 	}
@@ -64,8 +63,9 @@ func ApplyDevLoop(ctx context.Context, a *applier.Applier, overlayDir string, re
 // builders-kustomization.yaml.tmpl — pointed at the exact same tree, so
 // anything the overlay adds later isn't silently dropped here). It then
 // rewrites each base ghcr.io image ref to the resolved ref, and patches the
-// git-server container's memory limit. Pure (no I/O) so it can be unit-tested.
-func renderDevLoopKustomization(refs map[string]string, gitServerMemLimit string) string {
+// git-server and git-auto-sync container memory limits. Pure (no I/O) so it
+// can be unit-tested.
+func renderDevLoopKustomization(refs map[string]string, gitServerMemLimit, gitAutoSyncMemLimit string) string {
 	var images strings.Builder
 	for _, name := range flywheelSchema.ImageNames {
 		ref := refs[name]
@@ -80,14 +80,14 @@ kind: Kustomization
 resources:
   - ../overlays/local
 images:
-%s%s`, images.String(), gitServerMemoryPatch(gitServerMemLimit))
+%s%s`, images.String(), devLoopMemoryPatches(gitServerMemLimit, gitAutoSyncMemLimit))
 }
 
-// gitServerMemoryPatch returns a kustomize strategic-merge patch block that
-// sets the git-server container's memory limit. Shared shape with the
+// devLoopMemoryPatches returns kustomize strategic-merge patches that set the
+// git-server and git-auto-sync container memory limits. Shared shape with the
 // flywheel-dev-loop Flux Kustomization (builders-kustomization.yaml.tmpl) so
 // the direct-apply path and the Flux reconcile path converge on one value.
-func gitServerMemoryPatch(limit string) string {
+func devLoopMemoryPatches(gitServerLimit, gitAutoSyncLimit string) string {
 	return fmt.Sprintf(`patches:
   - patch: |-
       apiVersion: apps/v1
@@ -103,7 +103,21 @@ func gitServerMemoryPatch(limit string) string {
                 resources:
                   limits:
                     memory: %s
-`, naming.FlywheelNamespace, limit)
+  - patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: git-auto-sync
+        namespace: %s
+      spec:
+        template:
+          spec:
+            containers:
+              - name: controller
+                resources:
+                  limits:
+                    memory: %s
+`, naming.FlywheelNamespace, gitServerLimit, naming.FlywheelNamespace, gitAutoSyncLimit)
 }
 
 // splitImageRef splits an image reference into newName + newTag. If the

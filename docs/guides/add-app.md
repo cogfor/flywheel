@@ -191,6 +191,10 @@ kubectl get jobs -n flywheel-system  # build jobs: build-<name>-<ts>-<sha>
 * **Builds fail / pods `Pending` on a large repo** — the in-cluster git-server
   can hit its memory limit; raise `git_server.memory_limit` in
   `flywheel.yaml`.
+* **The shared `git-auto-sync` pod is `OOMKilled`** — Git subprocesses for all
+  declared worktrees share that controller's cgroup. Raise
+  `git_auto_sync.memory_limit` in `flywheel.yaml`, then run `flywheel up` to
+  apply the new limit through both Flywheel reconciliation paths.
 
 ## Off-the-shelf: no builder
 

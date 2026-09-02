@@ -36,6 +36,27 @@ spec:
               memory: 128Mi
 `
 
+// baseGitAutoSyncManifest is the second target of the shared dev-loop memory
+// patches. Its request is deliberately distinct so the test proves the patch
+// changes only the limit.
+const baseGitAutoSyncManifest = `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: git-auto-sync
+  namespace: flywheel-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: controller
+          image: ghcr.io/cobr-io/git-auto-sync:v0.1.0
+          resources:
+            requests:
+              memory: 24Mi
+            limits:
+              memory: 128Mi
+`
+
 // buildKustomize mirrors applier.buildKustomize: a krusty build with the
 // load-restriction relaxed so the transient kustomization's
 // `../overlays/local` (and, transitively, its `../../base`) references
@@ -99,15 +120,18 @@ func devLoopFixture(t *testing.T, baseFiles, overlayFiles map[string]string) str
 // through a real krusty build, the same engine the applier uses, and
 // through the overlay indirection (transient -> ../overlays/local ->
 // ../../base) that ApplyDevLoop now goes through.
-func TestRenderDevLoopKustomization_PatchesGitServerMemory(t *testing.T) {
-	transient := devLoopFixture(t, map[string]string{"git-server.yaml": baseGitServerManifest}, nil)
+func TestRenderDevLoopKustomization_PatchesMemoryLimits(t *testing.T) {
+	transient := devLoopFixture(t, map[string]string{
+		"git-server.yaml":    baseGitServerManifest,
+		"git-auto-sync.yaml": baseGitAutoSyncManifest,
+	}, nil)
 
 	refs := map[string]string{
 		"git-server":               "k3d-reg:5000/git-server:dogfood-abc",
 		"git-auto-sync":            "k3d-reg:5000/git-auto-sync:dogfood-abc",
 		"image-builder-controller": "k3d-reg:5000/image-builder-controller:dogfood-abc",
 	}
-	k := renderDevLoopKustomization(refs, "512Mi")
+	k := renderDevLoopKustomization(refs, "512Mi", "384Mi")
 	if err := os.WriteFile(filepath.Join(transient, "kustomization.yaml"), []byte(k), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +143,9 @@ func TestRenderDevLoopKustomization_PatchesGitServerMemory(t *testing.T) {
 	if strings.Contains(out, "memory: 128Mi") {
 		t.Errorf("base 128Mi limit should have been overridden:\n%s", out)
 	}
+	if !strings.Contains(out, "memory: 384Mi") {
+		t.Errorf("patched git-auto-sync limit (384Mi) not in build output:\n%s", out)
+	}
 	// The image rewrite still composes alongside the patch.
 	if !strings.Contains(out, "k3d-reg:5000/git-server:dogfood-abc") {
 		t.Errorf("git-server image rewrite missing:\n%s", out)
@@ -126,6 +153,9 @@ func TestRenderDevLoopKustomization_PatchesGitServerMemory(t *testing.T) {
 	// The request floor is untouched (we only patch the limit).
 	if !strings.Contains(out, "memory: 32Mi") {
 		t.Errorf("request floor should be preserved:\n%s", out)
+	}
+	if !strings.Contains(out, "memory: 24Mi") {
+		t.Errorf("git-auto-sync request floor should be preserved:\n%s", out)
 	}
 }
 
@@ -136,12 +166,15 @@ func TestRenderDevLoopKustomization_DefaultLimit(t *testing.T) {
 		"git-auto-sync":            "ghcr.io/cobr-io/git-auto-sync:v0.1.0",
 		"image-builder-controller": "ghcr.io/cobr-io/image-builder-controller:v0.1.0",
 	}
-	k := renderDevLoopKustomization(refs, "128Mi")
+	k := renderDevLoopKustomization(refs, "128Mi", "128Mi")
 	if !strings.Contains(k, "memory: 128Mi") {
 		t.Errorf("expected the default 128Mi in the patch:\n%s", k)
 	}
 	if !strings.Contains(k, "name: git-server") {
 		t.Errorf("patch should target git-server:\n%s", k)
+	}
+	if !strings.Contains(k, "name: git-auto-sync") {
+		t.Errorf("patch should target git-auto-sync:\n%s", k)
 	}
 }
 
@@ -171,8 +204,9 @@ data:
 	// overlay (i.e. resourced ../base directly, the pre-T16 behavior) would
 	// be missing marker-overlay.
 	transient := devLoopFixture(t, map[string]string{
-		"marker.yaml":     baseMarker,
-		"git-server.yaml": baseGitServerManifest, // target for the memory-limit patch below
+		"marker.yaml":        baseMarker,
+		"git-server.yaml":    baseGitServerManifest, // targets for the memory-limit patches below
+		"git-auto-sync.yaml": baseGitAutoSyncManifest,
 	}, map[string]string{
 		"marker.yaml": overlayMarker,
 	})
@@ -182,7 +216,7 @@ data:
 		"git-auto-sync":            "ghcr.io/cobr-io/git-auto-sync:v0.1.0",
 		"image-builder-controller": "ghcr.io/cobr-io/image-builder-controller:v0.1.0",
 	}
-	k := renderDevLoopKustomization(refs, "128Mi")
+	k := renderDevLoopKustomization(refs, "128Mi", "128Mi")
 	if !strings.Contains(k, "- ../overlays/local\n") {
 		t.Fatalf("transient kustomization must reference the overlay (../overlays/local), not base directly:\n%s", k)
 	}
@@ -239,7 +273,7 @@ func TestApplyDevLoop_RealManifests_RewriteByName(t *testing.T) {
 		"image-builder-controller": "flywheel-dev/image-builder-controller:dogfood",
 		"git-deploy-controller":    "flywheel-dev/git-deploy-controller:dogfood",
 	}
-	k := renderDevLoopKustomization(refs, "128Mi")
+	k := renderDevLoopKustomization(refs, "128Mi", "128Mi")
 	if err := os.WriteFile(filepath.Join(transient, "kustomization.yaml"), []byte(k), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -60,3 +60,21 @@ spec:
                   resources:
                     limits:
                       memory: {{ .GitServerMemoryLimit }}
+    # git-auto-sync memory limit (cfg.git_auto_sync.memory_limit, default
+    # 128Mi). The shared controller runs Git subprocesses for every declared
+    # worktree, so larger clients can raise its cgroup limit without carrying a
+    # client-owned patch that would fight this Kustomization.
+    - patch: |-
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: git-auto-sync
+          namespace: {{ .FlywheelNamespace }}
+        spec:
+          template:
+            spec:
+              containers:
+                - name: controller
+                  resources:
+                    limits:
+                      memory: {{ .GitAutoSyncMemoryLimit }}

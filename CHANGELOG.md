@@ -9,6 +9,13 @@ During the v0.x phase no compat promise is made between minor versions
 
 ## [Unreleased]
 
+### Added
+
+- `git_auto_sync.memory_limit` makes the shared worktree-sync controller's
+  memory limit configurable. The default remains `128Mi`; clients with many or
+  large repositories can raise it without carrying a patch that fights
+  Flywheel's direct and Flux reconciliation paths.
+
 ### Fixed
 
 - The image-builder controller now bypasses its informer cache when reading a
