@@ -47,11 +47,13 @@ git_server:
 
 git_auto_sync:
   # Memory limit for the shared controller that mirrors every declared
-  # application worktree into the local git-server. Git subprocesses and their
-  # filesystem cache count against this cgroup. The 128Mi default preserves
-  # existing behavior; raise it for clients with many or large worktrees.
-  # Applied to the running cluster on the next `flywheel up`.
-  memory_limit: 128Mi
+  # application worktree into the local git-server. This one scales with how
+  # MANY worktrees you declare, not how big they are: the controller forks Git
+  # subprocesses for all of them and their filesystem cache lands in one
+  # cgroup. 256Mi comfortably covers ~10 worktrees; raise it (e.g. 512Mi) if
+  # `kubectl -n flywheel-system get pod -l app=git-auto-sync` shows OOMKilled
+  # restarts. Applied to the running cluster on the next `flywheel up`.
+  memory_limit: 256Mi
 
 # workspace:
 #   # Sibling app repos this cluster's dev loop needs, one entry per worktree

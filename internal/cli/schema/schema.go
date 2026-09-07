@@ -142,22 +142,25 @@ func (f *File) GitServerMemoryLimit() string {
 // GitAutoSync holds tunables for the shared in-cluster git-auto-sync
 // controller that mirrors application worktrees into the local git-server.
 type GitAutoSync struct {
-	// MemoryLimit is the container memory limit. The default (128Mi) preserves
-	// existing behavior, but clients with many or large worktrees may need a
-	// higher limit because Git subprocesses and filesystem cache are charged to
-	// the controller's cgroup.
+	// MemoryLimit is the container memory limit. It scales with WORKTREE COUNT,
+	// not repo size: one shared controller runs Git subprocesses for every
+	// declared worktree, and their filesystem cache is charged to its cgroup.
 	// Optional; defaults to DefaultGitAutoSyncMemoryLimit via
-	// File.GitAutoSyncMemoryLimit(). A Kubernetes memory quantity (128Mi, 1Gi…).
+	// File.GitAutoSyncMemoryLimit(). A Kubernetes memory quantity (256Mi, 1Gi…).
 	MemoryLimit string `json:"memory_limit,omitempty"`
 }
 
 // DefaultGitAutoSyncMemoryLimit is the git-auto-sync container memory limit
-// when git_auto_sync.memory_limit is unset. Keep the historical baked-in value
-// so existing clients behave identically until they opt into a higher limit.
-const DefaultGitAutoSyncMemoryLimit = "128Mi"
+// when git_auto_sync.memory_limit is unset. Deliberately ABOVE the historical
+// baked-in 128Mi: a measured 11-worktree client settles at ~141Mi working set
+// and OOMKill-looped at 128Mi (~1 restart/26min). Raising only the limit costs
+// nothing at schedule time — requests stay at 32Mi, so this is a ceiling, not
+// a reservation — and it keeps a mid-size client working out of the box
+// instead of after it discovers the knob.
+const DefaultGitAutoSyncMemoryLimit = "256Mi"
 
 // GitAutoSyncMemoryLimit returns the configured git-auto-sync memory limit, or
-// the default ("128Mi") when unset.
+// the default ("256Mi") when unset.
 func (f *File) GitAutoSyncMemoryLimit() string {
 	if l := strings.TrimSpace(f.GitAutoSync.MemoryLimit); l != "" {
 		return l

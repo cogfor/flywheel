@@ -1,12 +1,16 @@
 package converge
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
+	flywheel "github.com/cobr-io/flywheel"
 	flywheelSchema "github.com/cobr-io/flywheel/internal/cli/schema"
 	"github.com/cobr-io/flywheel/internal/naming"
 )
@@ -80,8 +84,15 @@ func TestRenderBootstrap_ResolvesImageRefs(t *testing.T) {
 	}
 	// The flywheel-dev-loop Kustomization patches both dev-loop memory limits so
 	// Flux's reconcile agrees with the step-11a direct apply. cfg leaves both
-	// limits unset here, so each target must render with the shared 128Mi default.
-	for _, want := range []string{"patches:", "name: git-server", "name: git-auto-sync", "memory: 128Mi"} {
+	// limits unset here, so each target must render with its own schema default
+	// (they are different numbers — see DefaultGitAutoSyncMemoryLimit).
+	for _, want := range []string{
+		"patches:",
+		"name: git-server",
+		"name: git-auto-sync",
+		"memory: " + flywheelSchema.DefaultGitServerMemoryLimit,
+		"memory: " + flywheelSchema.DefaultGitAutoSyncMemoryLimit,
+	} {
 		if !strings.Contains(bk, want) {
 			t.Errorf("builders-kustomization.yaml missing dev-loop memory patch %q:\n%s", want, bk)
 		}
@@ -157,7 +168,21 @@ func TestRenderBootstrap_NoExplicitNulls(t *testing.T) {
 
 // Configured dev-loop memory limits flow into the flywheel-dev-loop
 // Kustomization's patches, so Flux reconciles the cluster to the raised limits.
-func TestRenderBootstrap_DevLoopMemoryLimits(t *testing.T) {
+//
+// The patches are taken out of the RENDERED Kustomization and built through
+// kustomize against the REAL manifests/dev-loop tree — the same thing
+// source-controller does with spec.patches — rather than substring-matched.
+// Nothing else validates this template's patch SHAPE, so a wrong Deployment
+// name silently no-ops and a wrong container name makes kustomize APPEND an
+// imageless container that only fails once it reaches a live cluster. Building
+// them also ties each limit to the container it landed on, which is what makes
+// a transposed pair visible (both numbers appear in the output either way).
+//
+// This is the Flux-path counterpart to
+// TestRenderDevLoopKustomization_PatchesMemoryLimits, which does the same for
+// the step-11a direct apply. Together they cover both halves of the
+// two-apply-paths invariant.
+func TestBuildersKustomization_PatchesBuildThroughKustomize(t *testing.T) {
 	cfg := &flywheelSchema.File{}
 	cfg.Client.Name = "acme"
 	cfg.Cluster.Name = "acme-local"
@@ -166,6 +191,8 @@ func TestRenderBootstrap_DevLoopMemoryLimits(t *testing.T) {
 	cfg.Flux.IntervalLocal = "10s"
 	cfg.Local.Domain = "localdev.me"
 	cfg.Namespaces.Apps = "apps" // loader-defaulted in production; set explicitly here
+	// Distinct from each other AND from both defaults, so neither a transposed
+	// pair nor a limit silently falling back to its default can pass.
 	cfg.GitServer.MemoryLimit = "512Mi"
 	cfg.GitAutoSync.MemoryLimit = "384Mi"
 
@@ -182,12 +209,66 @@ func TestRenderBootstrap_DevLoopMemoryLimits(t *testing.T) {
 	defer os.RemoveAll(dir)
 
 	bk := mustRead(t, filepath.Join(dir, "builders-kustomization.yaml"))
-	if !strings.Contains(bk, "memory: 512Mi") {
-		t.Errorf("configured git-server memory_limit not rendered into the dev-loop patch:\n%s", bk)
+	out := buildKustomizeForTest(t, devLoopTreeWithPatches(t, fluxKustomizationPatches(t, bk)))
+	assertContainerMemoryLimit(t, out, "git-server", "git-server", "512Mi")
+	assertContainerMemoryLimit(t, out, "git-auto-sync", "controller", "384Mi")
+}
+
+// fluxKustomizationPatches pulls the inline strategic-merge patches out of a
+// rendered Flux Kustomization's spec.patches.
+func fluxKustomizationPatches(t *testing.T, rendered string) []string {
+	t.Helper()
+	var k struct {
+		Spec struct {
+			Patches []struct {
+				Patch string `yaml:"patch"`
+			} `yaml:"patches"`
+		} `yaml:"spec"`
 	}
-	if !strings.Contains(bk, "memory: 384Mi") {
-		t.Errorf("configured git-auto-sync memory_limit not rendered into the dev-loop patch:\n%s", bk)
+	if err := yaml.Unmarshal([]byte(rendered), &k); err != nil {
+		t.Fatalf("parse rendered Kustomization: %v\n%s", err, rendered)
 	}
+	var out []string
+	for _, p := range k.Spec.Patches {
+		out = append(out, p.Patch)
+	}
+	if len(out) == 0 {
+		t.Fatalf("rendered Kustomization declares no spec.patches:\n%s", rendered)
+	}
+	return out
+}
+
+// devLoopTreeWithPatches materializes the embedded manifests/dev-loop tree and
+// returns a transient overlay dir — a sibling of base/ and overlays/, exactly
+// like the one ApplyDevLoop creates — that resources ../overlays/local and
+// applies patches on top. Ready for buildKustomizeForTest.
+func devLoopTreeWithPatches(t *testing.T, patches []string) string {
+	t.Helper()
+	root := t.TempDir()
+	sub, err := fs.Sub(flywheel.Assets, "manifests/dev-loop")
+	if err != nil {
+		t.Fatalf("embed manifests/dev-loop missing: %v", err)
+	}
+	if err := os.CopyFS(root, sub); err != nil {
+		t.Fatalf("copy embedded dev-loop tree: %v", err)
+	}
+	transient := filepath.Join(root, "transient")
+	if err := os.Mkdir(transient, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	b.WriteString("apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nresources:\n  - ../overlays/local\npatches:\n")
+	for _, p := range patches {
+		b.WriteString("  - patch: |-\n")
+		for _, line := range strings.Split(strings.TrimRight(p, "\n"), "\n") {
+			b.WriteString("      " + line + "\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(transient, "kustomization.yaml"), []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return transient
 }
 
 // TestRenderBootstrap_RejectsUntaggedOverride asserts that overrides
